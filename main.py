@@ -1,7 +1,7 @@
 import requests
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 API_KEY = os.getenv("API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -13,7 +13,7 @@ HEADERS = {
 }
 
 # =========================
-# FUNCIONES MATEMÁTICAS
+# FUNCIONES
 # =========================
 def poisson(l, k):
     return (math.exp(-l) * (l ** k)) / math.factorial(k)
@@ -27,16 +27,15 @@ def prob_btts(lh, la):
     return 1 - p0h - p0a + (p0h * p0a)
 
 # =========================
-# PARTIDOS DEL DÍA
+# PARTIDOS POR FECHA
 # =========================
-def get_matches():
-    today = datetime.now().strftime("%Y-%m-%d")
-    url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={today}"
+def get_matches_by_date(date):
+    url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date}"
     res = requests.get(url, headers=HEADERS).json()
     return res.get("response", [])
 
 # =========================
-# STATS DE EQUIPOS
+# STATS
 # =========================
 def get_team_stats(team_id, league_id):
     url = f"https://api-football-v1.p.rapidapi.com/v3/teams/statistics?team={team_id}&league={league_id}&season=2023"
@@ -56,7 +55,7 @@ def get_team_stats(team_id, league_id):
     }
 
 # =========================
-# ANÁLISIS REAL
+# ANALISIS
 # =========================
 def analizar(match):
     home = match["teams"]["home"]["name"]
@@ -66,21 +65,19 @@ def analizar(match):
     league_id = match["league"]["id"]
     league = match["league"]["name"]
 
-    h_stats = get_team_stats(home_id, league_id)
-    a_stats = get_team_stats(away_id, league_id)
+    h = get_team_stats(home_id, league_id)
+    a = get_team_stats(away_id, league_id)
 
-    if not h_stats or not a_stats:
+    if not h or not a:
         return None
 
-    # Goles esperados
-    lh = (h_stats["scored"] + a_stats["conceded"]) / 2
-    la = (a_stats["scored"] + h_stats["conceded"]) / 2
+    lh = (h["scored"] + a["conceded"]) / 2
+    la = (a["scored"] + h["conceded"]) / 2
 
     p_over = prob_over15(lh + la)
     p_btts = prob_btts(lh, la)
 
     score = 0
-
     if p_over > 0.75:
         score += 3
     if p_btts > 0.65:
@@ -90,7 +87,7 @@ def analizar(match):
     if la > 1.2:
         score += 2
 
-    if score < 5:
+    if score < 3:
         return None
 
     if p_btts > p_over:
@@ -116,34 +113,33 @@ def send(msg):
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 # =========================
-# MAIN
+# MAIN SEMANAL
 # =========================
 def main():
-    matches = get_matches()
+    today = datetime.now()
+    msg = "🔥 PICKS SEMANALES 🔥\n\n"
 
-    today_str = datetime.now().strftime("%d-%m-%Y")
+    for i in range(7):
+        date = (today + timedelta(days=i)).strftime("%Y-%m-%d")
+        display = (today + timedelta(days=i)).strftime("%d-%m-%Y")
 
-    if not matches:
-        send("⚠️ No hay partidos hoy")
-        return
+        matches = get_matches_by_date(date)
+        results = []
 
-    results = []
+        for m in matches:
+            r = analizar(m)
+            if r:
+                results.append(r)
 
-    for m in matches:
-        r = analizar(m)
-        if r:
-            results.append(r)
+        if results:
+            results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-    # Ordenar por mejor score
-    results = sorted(results, key=lambda x: x["score"], reverse=True)
+            msg += f"📅 {display}\n"
 
-    msg = f"🔥 PICKS PRO REALES ({today_str}) 🔥\n\n"
+            for r in results[:3]:
+                msg += f"{r['league']}\n{r['match']}\n{r['pick']} ({r['prob']}%)\n\n"
 
-    if not results:
-        msg += "No hay picks claros hoy ⚠️"
-    else:
-        for r in results[:5]:
-            msg += f"{r['league']}\n{r['match']}\n{r['pick']} ({r['prob']}%) | Score: {r['score']}\n\n"
+            msg += "---------------------\n\n"
 
     send(msg)
 
