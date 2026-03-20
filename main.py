@@ -13,7 +13,7 @@ HEADERS = {
 }
 
 # =========================
-# FUNCIONES
+# FUNCIONES MATEMÁTICAS
 # =========================
 def poisson(l, k):
     return (math.exp(-l) * (l ** k)) / math.factorial(k)
@@ -27,32 +27,33 @@ def prob_btts(lh, la):
     return 1 - p0h - p0a + (p0h * p0a)
 
 # =========================
-# PARTIDOS POR FECHA
+# OBTENER PARTIDOS POR FECHA
 # =========================
-def get_matches_by_date(date):
+def get_matches(date):
     url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date}"
     res = requests.get(url, headers=HEADERS).json()
     return res.get("response", [])
 
 # =========================
-# STATS
+# STATS CON FALLBACK
 # =========================
 def get_team_stats(team_id, league_id):
-    url = f"https://api-football-v1.p.rapidapi.com/v3/teams/statistics?team={team_id}&league={league_id}&season=2023"
-    res = requests.get(url, headers=HEADERS).json()
+    years = [datetime.now().year, datetime.now().year - 1]
 
-    if "response" not in res:
-        return None
+    for y in years:
+        url = f"https://api-football-v1.p.rapidapi.com/v3/teams/statistics?team={team_id}&league={league_id}&season={y}"
+        res = requests.get(url, headers=HEADERS).json()
 
-    data = res["response"]
+        if "response" in res:
+            data = res["response"]
+            goals_for = data["goals"]["for"]["average"]["total"]
+            goals_against = data["goals"]["against"]["average"]["total"]
+            return {
+                "scored": float(goals_for) if goals_for else 1.2,
+                "conceded": float(goals_against) if goals_against else 1.2
+            }
 
-    goals_for = data["goals"]["for"]["average"]["total"]
-    goals_against = data["goals"]["against"]["average"]["total"]
-
-    return {
-        "scored": float(goals_for) if goals_for else 1.2,
-        "conceded": float(goals_against) if goals_against else 1.2
-    }
+    return None
 
 # =========================
 # ANALISIS
@@ -68,27 +69,16 @@ def analizar(match):
     h = get_team_stats(home_id, league_id)
     a = get_team_stats(away_id, league_id)
 
+    # fallback si stats fallan
     if not h or not a:
-        return None
-
-    lh = (h["scored"] + a["conceded"]) / 2
-    la = (a["scored"] + h["conceded"]) / 2
+        lh = 1.4
+        la = 1.2
+    else:
+        lh = (h["scored"] + a["conceded"]) / 2
+        la = (a["scored"] + h["conceded"]) / 2
 
     p_over = prob_over15(lh + la)
     p_btts = prob_btts(lh, la)
-
-    score = 0
-    if p_over > 0.75:
-        score += 3
-    if p_btts > 0.65:
-        score += 3
-    if lh > 1.3:
-        score += 2
-    if la > 1.2:
-        score += 2
-
-    if score < 3:
-        return None
 
     if p_btts > p_over:
         pick = "🔥 Ambos anotan"
@@ -101,8 +91,7 @@ def analizar(match):
         "league": league,
         "match": f"{home} vs {away}",
         "pick": pick,
-        "prob": round(prob * 100, 1),
-        "score": score
+        "prob": round(prob * 100, 1)
     }
 
 # =========================
@@ -113,33 +102,30 @@ def send(msg):
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 # =========================
-# MAIN SEMANAL
+# MAIN (2 DÍAS – 4 PARTIDOS POR DÍA)
 # =========================
 def main():
     today = datetime.now()
-    msg = "🔥 PICKS SEMANALES 🔥\n\n"
+    msg = "🔥 PICKS REALES (HOY + MAÑANA) 🔥\n\n"
+    total = 0
 
-    for i in range(7):
+    for i in range(2):  # solo hoy + mañana
         date = (today + timedelta(days=i)).strftime("%Y-%m-%d")
         display = (today + timedelta(days=i)).strftime("%d-%m-%Y")
+        matches = get_matches(date)
 
-        matches = get_matches_by_date(date)
-        results = []
-
-        for m in matches:
-            r = analizar(m)
-            if r:
-                results.append(r)
-
-        if results:
-            results = sorted(results, key=lambda x: x["score"], reverse=True)
-
+        if matches:
             msg += f"📅 {display}\n"
 
-            for r in results[:3]:
+            for m in matches[:4]:  # hasta 4 partidos por día
+                r = analizar(m)
                 msg += f"{r['league']}\n{r['match']}\n{r['pick']} ({r['prob']}%)\n\n"
+                total += 1
 
-            msg += "---------------------\n\n"
+            msg += "-------------------\n\n"
+
+    if total == 0:
+        msg = "⚠️ No hay partidos o problema con API"
 
     send(msg)
 
