@@ -2,11 +2,8 @@ import requests
 import math
 import os
 
-API_KEY = os.getenv("API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-
-HEADERS = {"x-rapidapi-key": API_KEY}
 
 def poisson(l, k):
     return (math.exp(-l) * l**k) / math.factorial(k)
@@ -19,15 +16,21 @@ def prob_btts(lh, la):
     p0a = poisson(la,0)
     return 1 - p0h - p0a + (p0h * p0a)
 
+# 🔥 PARTIDOS DE PRUEBA (SIN API)
 def get_matches():
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures?next=15"
-    response = requests.get(url, headers=HEADERS)
-    return response.json()["response"]
+    return [
+        {"teams": {"home": {"name": "Barcelona"}, "away": {"name": "Valencia"}}},
+        {"teams": {"home": {"name": "Real Madrid"}, "away": {"name": "Sevilla"}}},
+        {"teams": {"home": {"name": "Bayern Munich"}, "away": {"name": "Dortmund"}}},
+        {"teams": {"home": {"name": "Liverpool"}, "away": {"name": "Chelsea"}}},
+        {"teams": {"home": {"name": "Inter Milan"}, "away": {"name": "Atalanta"}}}
+    ]
 
 def analizar(m):
     home = m["teams"]["home"]["name"]
     away = m["teams"]["away"]["name"]
 
+    # Valores simulados (puedes ajustarlos)
     lh = 1.5
     la = 1.3
 
@@ -45,10 +48,10 @@ def analizar(m):
 
     if score >= 6:
         if p2 > p1:
-            pick = "🔥 BTTS"
+            pick = "🔥 Ambos anotan"
             prob = p2
         else:
-            pick = "✅ Over 1.5"
+            pick = "✅ Más de 1.5 goles"
             prob = p1
 
     return {
@@ -73,4 +76,4 @@ def main():
     send(msg)
 
 main()
-bot completo 
+    
