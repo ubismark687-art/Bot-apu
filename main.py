@@ -2,10 +2,9 @@ import requests
 import math
 import os
 from datetime import datetime, timedelta
+import pytz  # Para manejar zona horaria
 
-# =========================================
 # CONFIGURACIÓN
-# =========================================
 API_KEY = os.getenv("API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -15,9 +14,10 @@ HEADERS = {
     "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
 }
 
-# =========================================
+# ZONA HORARIA
+tz = pytz.timezone("America/Managua")
+
 # FUNCIONES MATEMÁTICAS
-# =========================================
 def poisson(l, k):
     return (math.exp(-l) * (l ** k)) / math.factorial(k)
 
@@ -29,35 +29,33 @@ def prob_btts(lh, la):
     p0a = poisson(la, 0)
     return 1 - p0h - p0a + (p0h * p0a)
 
-# =========================================
 # OBTENER PARTIDOS POR FECHA
-# =========================================
 def get_matches(date):
     url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date}"
-    res = requests.get(url, headers=HEADERS).json()
-    return res.get("response", [])
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10).json()
+        return res.get("response", [])
+    except Exception as e:
+        print(f"Error API: {e}")
+        return []
 
-# =========================================
-# STATS CON FALLBACK AUTOMÁTICO
-# =========================================
+# STATS CON FALLBACK
 def get_team_stats(team_id, league_id):
-    years = [datetime.now().year, datetime.now().year - 1]
+    years = [datetime.now().year, datetime.now().year-1]
     for y in years:
         url = f"https://api-football-v1.p.rapidapi.com/v3/teams/statistics?team={team_id}&league={league_id}&season={y}"
-        res = requests.get(url, headers=HEADERS).json()
-        if "response" in res:
-            data = res["response"]
-            goals_for = data["goals"]["for"]["average"]["total"]
-            goals_against = data["goals"]["against"]["average"]["total"]
-            return {
-                "scored": float(goals_for) if goals_for else 1.2,
-                "conceded": float(goals_against) if goals_against else 1.2
-            }
-    return None
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=10).json()
+            if "response" in res:
+                data = res["response"]
+                gf = data["goals"]["for"]["average"]["total"]
+                ga = data["goals"]["against"]["average"]["total"]
+                return {"scored": float(gf) if gf else 1.2, "conceded": float(ga) if ga else 1.2}
+        except:
+            continue
+    return {"scored":1.2, "conceded":1.2}  # fallback si falla
 
-# =========================================
-# ANALISIS DE PARTIDO
-# =========================================
+# ANALIZAR PARTIDO
 def analizar(match):
     home = match["teams"]["home"]["name"]
     away = match["teams"]["away"]["name"]
@@ -69,18 +67,12 @@ def analizar(match):
     h = get_team_stats(home_id, league_id)
     a = get_team_stats(away_id, league_id)
 
-    # fallback si stats no disponibles
-    if not h or not a:
-        lh = 1.4
-        la = 1.2
-    else:
-        lh = (h["scored"] + a["conceded"]) / 2
-        la = (a["scored"] + h["conceded"]) / 2
+    lh = (h["scored"] + a["conceded"]) / 2
+    la = (a["scored"] + h["conceded"]) / 2
 
     p_over = prob_over15(lh + la)
     p_btts = prob_btts(lh, la)
 
-    # Elegir pick más confiable
     if p_btts > p_over:
         pick = "🔥 Ambos anotan"
         prob = p_btts
@@ -88,48 +80,44 @@ def analizar(match):
         pick = "✅ Más de 1.5 goles"
         prob = p_over
 
-    # Calcular score de confiabilidad 1-10
     score = round(prob * 10, 1)
 
-    return {
-        "league": league,
-        "match": f"{home} vs {away}",
-        "pick": pick,
-        "prob": round(prob * 100, 1),
-        "score": score
-    }
+    return {"league": league, "match": f"{home} vs {away}", "pick": pick, "prob": round(prob*100,1), "score":score}
 
-# =========================================
 # ENVÍO A TELEGRAM
-# =========================================
 def send(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    try:
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except Exception as e:
+        print(f"Error Telegram: {e}")
 
-# =========================================
-# MAIN: 7 DÍAS, 5 PARTIDOS POR DÍA
-# =========================================
+# MAIN: HOY + MAÑANA, 4-5 PARTIDOS POR DÍA
 def main():
-    today = datetime.now()
-    msg = "🔥 PICKS TOP SEMANALES 🔥\n\n"
+    today = datetime.now(tz)
+    msg = "🔥 PICKS SERIOS 2 DÍAS 🔥\n\n"
     total = 0
 
-    for i in range(7):  # 7 días
-        date = (today + timedelta(days=i)).strftime("%Y-%m-%d")
-        display = (today + timedelta(days=i)).strftime("%d-%m-%Y")
-        matches = get_matches(date)
+    for i in range(2):
+        date_obj = today + timedelta(days=i)
+        date_str = date_obj.strftime("%Y-%m-%d")
+        display = date_obj.strftime("%d-%m-%Y")
 
+        matches = get_matches(date_str)
         if matches:
             msg += f"📅 {display}\n"
-            for m in matches[:5]:  # hasta 5 partidos por día
+            for m in matches[:5]:
                 r = analizar(m)
                 msg += f"{r['league']}\n{r['match']}\n{r['pick']} ({r['prob']}%) | Score: {r['score']}/10\n\n"
                 total += 1
             msg += "----------------------\n\n"
+        else:
+            print(f"No hay partidos para {display} o problema con API")
 
     if total == 0:
         msg = "⚠️ No hay partidos o problema con API"
 
     send(msg)
 
-main()
+if __name__ == "__main__":
+    main()
