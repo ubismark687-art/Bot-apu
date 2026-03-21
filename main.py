@@ -1,6 +1,5 @@
 import requests
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =========================
 # CONFIGURACIÓN
@@ -11,15 +10,14 @@ CHAT_ID = "7438828345"
 
 HEADERS = {"x-rapidapi-key": API_KEY}
 
-# Ajustes de apuestas
-UMBRAL_PROBABILIDAD = 55  # % mínimo para considerar partido
-MAX_PARTIDOS = 3  # Solo enviar los 3 mejores
+UMBRAL_PROB_AMBOS_MARCAN = 55
+UMBRAL_PROB_OVER_15 = 55
+MAX_PARTIDOS = 5  # Top partidos a enviar
 
 # =========================
 # FUNCIONES
 # =========================
-def obtener_partidos():
-    fecha = datetime.now().strftime("%Y-%m-%d")
+def obtener_partidos(fecha):
     url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
     params = {"date": fecha}
     try:
@@ -30,7 +28,7 @@ def obtener_partidos():
         print("Error obteniendo partidos:", e)
         return []
 
-def filtrar_y_rankear(partidos):
+def filtrar_partidos(partidos):
     recomendados = []
     for p in partidos:
         try:
@@ -40,42 +38,47 @@ def filtrar_y_rankear(partidos):
             fecha_partido = p['fixture']['date']
             hora = fecha_partido.split("T")[1][:5]
 
-            ambos_prob = 50  # Default si no hay datos
+            prob_ambos = 50
+            prob_over = 50
             odds = p.get('odds', [])
 
             if odds:
                 for o in odds:
                     if o['bookmaker']['name'].lower() == 'bet365':
                         for bet in o['bets']:
-                            if bet['name'].lower() in ['both teams to score', 'ambos marcan']:
-                                ambos_prob = max([float(option['value']) for option in bet['values']])
+                            name_lower = bet['name'].lower()
+                            if name_lower in ['both teams to score', 'ambos marcan']:
+                                prob_ambos = max([float(opt['value']) for opt in bet['values']])
+                            elif name_lower in ['over/under 1.5', 'over 1.5', 'más 1.5']:
+                                prob_over = max([float(opt['value']) for opt in bet['values']])
 
-            if float(ambos_prob) >= UMBRAL_PROBABILIDAD:
+            if prob_ambos >= UMBRAL_PROB_AMBOS_MARCAN and prob_over >= UMBRAL_PROB_OVER_15:
                 recomendados.append({
                     "liga": liga,
                     "local": local,
                     "visitante": visitante,
                     "hora": hora,
-                    "prob": ambos_prob
+                    "prob_ambos": prob_ambos,
+                    "prob_over": prob_over
                 })
         except:
             continue
 
-    # Ordenar de mayor a menor probabilidad
-    recomendados = sorted(recomendados, key=lambda x: x['prob'], reverse=True)
+    recomendados = sorted(recomendados, key=lambda x: x['prob_ambos'], reverse=True)
     return recomendados[:MAX_PARTIDOS]
 
-def enviar_telegram(mensajes):
-    if not mensajes:
-        enviar_telegram_individual("No hay partidos con alta probabilidad de ambos marcan hoy.")
+def enviar_telegram(partidos):
+    if not partidos:
+        enviar_telegram_individual("No hay partidos que cumplan Ambos Marcan + Over 1.5 para hoy y mañana.")
         return
 
-    resumen = "📊 *Top partidos recomendados para apostar Ambos Marcan* 📊\n\n"
-    for i, p in enumerate(mensajes, 1):
+    resumen = "📊 *Partidos recomendados para apostar Ambos Marcan + Over 1.5* 📊\n\n"
+    for i, p in enumerate(partidos, 1):
         resumen += (f"{i}. {p['liga']}\n"
                     f"{p['local']} vs {p['visitante']}\n"
                     f"Hora: {p['hora']}\n"
-                    f"Probabilidad Ambos Marcan: {p['prob']}%\n---\n")
+                    f"Probabilidad Ambos Marcan: {p['prob_ambos']}%\n"
+                    f"Probabilidad Over 1.5: {p['prob_over']}%\n---\n")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": resumen, "parse_mode": "Markdown"}
@@ -92,25 +95,21 @@ def enviar_telegram_individual(mensaje):
     except Exception as e:
         print("Error enviando Telegram:", e)
 
-def analizar_y_enviar():
-    print("Obteniendo partidos...")
-    partidos = obtener_partidos()
-    if not partidos:
-        enviar_telegram_individual("No se encontraron partidos hoy.")
-        return
-
-    recomendados = filtrar_y_rankear(partidos)
-    if not recomendados:
-        enviar_telegram_individual("No hay partidos con alta probabilidad de ambos marcan hoy.")
-        return
-
-    enviar_telegram(recomendados)
-    print(f"Resumen enviado con {len(recomendados)} partidos.")
-
 # =========================
-# LOOP INFINITO
+# PROCESO PRINCIPAL
 # =========================
-while True:
-    analizar_y_enviar()
-    print("Esperando 1 hora para la siguiente revisión...\n")
-    time.sleep(3600)
+def main():
+    fechas = [datetime.now(), datetime.now() + timedelta(days=1)]
+    todos_partidos = []
+
+    for fecha in fechas:
+        fecha_str = fecha.strftime("%Y-%m-%d")
+        partidos = obtener_partidos(fecha_str)
+        filtrados = filtrar_partidos(partidos)
+        todos_partidos.extend(filtrados)
+
+    enviar_telegram(todos_partidos)
+    print(f"Se enviaron {len(todos_partidos)} partidos a Telegram.")
+
+if __name__ == "__main__":
+    main()
