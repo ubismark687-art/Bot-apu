@@ -1,130 +1,206 @@
 import requests
 import math
+from datetime import datetime, timedelta
+import pytz
+import time
+import json
+import os
 
 # =========================
-# CONFIG
+# CONFIGURACIÓN
 # =========================
-API_KEY = "TU_API_KEY"
+API_KEY = "TU_API_KEY"  # Tu API Key de RapidAPI
 HEADERS = {"x-rapidapi-key": API_KEY}
 
-TELEGRAM_TOKEN = "TU_TOKEN"
-CHAT_ID = "TU_CHAT_ID"
+TELEGRAM_TOKEN = "TU_TOKEN"  # Token de tu bot Telegram
+CHAT_ID = "TU_CHAT_ID"       # Chat ID para enviar picks
+TIMEZONE = "America/Managua"
 
-SEASON = 2026
-HOME_ADVANTAGE = 1.2  # +20% goles para local
-MIN_PROB = 0.75       # picks solo si >75% probabilidad
+HISTORICO_FILE = "historico_picks.json"
 
 # =========================
-# POISSON
+# UTILIDADES MATEMÁTICAS
 # =========================
 def poisson_prob(lmbda, k):
     return (math.exp(-lmbda) * (lmbda ** k)) / math.factorial(k)
 
-def prob_over_n(lmbda_total, n):
-    prob = sum(poisson_prob(lmbda_total, k) for k in range(n))
-    return 1 - prob
+def prob_over_15(lmbda_total):
+    p0 = poisson_prob(lmbda_total, 0)
+    p1 = poisson_prob(lmbda_total, 1)
+    return 1 - (p0 + p1)
 
-def prob_btts(lambda_home, lambda_away):
-    p_home_goals = 1 - poisson_prob(lambda_home, 0)
-    p_away_goals = 1 - poisson_prob(lambda_away, 0)
-    return p_home_goals * p_away_goals
-
-# =========================
-# API
-# =========================
-def get_matches():
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures?next=20"
-    matches = requests.get(url, headers=HEADERS).json()["response"]
-    return sorted(matches, key=lambda x: x["fixture"]["timestamp"])
-
-def get_team_stats(team_id):
-    url = f"https://api-football-v1.p.rapidapi.com/v3/teams/statistics?team={team_id}&season={SEASON}"
-    res = requests.get(url, headers=HEADERS).json()["response"]
-    stats = res["team"]["statistics"]["all"]["goals"]
-    matches_played = stats["matches"]["played"]["total"] or 1
-    avg_scored = stats["for"]["total"]["total"] / matches_played
-    avg_conceded = stats["against"]["total"]["total"] / matches_played
-    last5_btts = stats.get("btts", {}).get("last5", 3)
-    return {"avg_scored": avg_scored, "avg_conceded": avg_conceded, "btts_last5": last5_btts}
-
-def get_injuries(match):
-    home_inj = sum(1 for p in match["teams"]["home"].get("players", []) if p.get("injured"))
-    away_inj = sum(1 for p in match["teams"]["away"].get("players", []) if p.get("injured"))
-    return home_inj, away_inj
+def prob_btts(lmbda_home, lmbda_away):
+    p_home0 = poisson_prob(lmbda_home, 0)
+    p_away0 = poisson_prob(lmbda_away, 0)
+    p_00 = p_home0 * p_away0
+    return 1 - p_home0 - p_away0 + p_00
 
 # =========================
-# ANALISIS ULTRA PRO
+# HISTÓRICO Y ESTADÍSTICAS
 # =========================
-def analizar(match):
-    home_id = match["teams"]["home"]["id"]
-    away_id = match["teams"]["away"]["id"]
-    home_name = match["teams"]["home"]["name"]
-    away_name = match["teams"]["away"]["name"]
+def cargar_historico():
+    if os.path.exists(HISTORICO_FILE):
+        with open(HISTORICO_FILE, "r") as f:
+            return json.load(f)
+    return {"picks": {}, "estadisticas": {}}
 
-    h = get_team_stats(home_id)
-    a = get_team_stats(away_id)
+def guardar_historico(data):
+    with open(HISTORICO_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-    lambda_home = ((h["avg_scored"] * HOME_ADVANTAGE) + a["avg_conceded"]) / 2
-    lambda_away = (a["avg_scored"] + h["avg_conceded"]) / 2
-    lambda_total = lambda_home + lambda_away
-
-    home_inj, away_inj = get_injuries(match)
-    lambda_home *= 0.9 ** home_inj
-    lambda_away *= 0.9 ** away_inj
-    lambda_total = lambda_home + lambda_away
-
-    # Probabilidades
-    p_btts = prob_btts(lambda_home, lambda_away)
-    p_over15 = prob_over_n(lambda_total, 2)
-    p_over25 = prob_over_n(lambda_total, 3)
-    p_under25 = 1 - p_over25
-
-    picks = []
-    # BTTS
-    if p_btts >= MIN_PROB:
-        picks.append(("🔥 BTTS", round(p_btts*100,1)))
-    # Over 1.5
-    if p_over15 >= MIN_PROB:
-        picks.append(("✅ Over 1.5", round(p_over15*100,1)))
-    # Over 2.5
-    if p_over25 >= MIN_PROB:
-        picks.append(("⚡ Over 2.5", round(p_over25*100,1)))
-    # Under 2.5
-    if p_under25 >= MIN_PROB:
-        picks.append(("💧 Under 2.5", round(p_under25*100,1)))
-
-    return {"match": f"{home_name} vs {away_name}", "picks": picks}
+def actualizar_estadisticas(historico, pick_info):
+    tipo = pick_info["pick"]
+    liga = pick_info.get("league", "General")
+    if liga not in historico["estadisticas"]:
+        historico["estadisticas"][liga] = {"ganados":0, "perdidos":0, "total":0}
+    stats = historico["estadisticas"][liga]
+    stats["total"] += 1
+    if pick_info["status"] == "ganado":
+        stats["ganados"] += 1
+    else:
+        stats["perdidos"] += 1
 
 # =========================
 # TELEGRAM
 # =========================
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except Exception as e:
+        print("Error enviando Telegram:", e)
+
+# =========================
+# FUNCIONES DE API
+# =========================
+def get_matches(days=2):
+    matches = []
+    tz = pytz.timezone(TIMEZONE)
+    for d in range(days):
+        date = (datetime.now(tz) + timedelta(days=d)).strftime("%Y-%m-%d")
+        url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date}"
+        try:
+            resp = requests.get(url, headers=HEADERS)
+            data = resp.json()
+            matches.extend(data.get("response", []))
+        except Exception as e:
+            print(f"Error obteniendo partidos para {date}: {e}")
+    return matches
+
+def get_team_stats(team_id):
+    try:
+        url = f"https://api-football-v1.p.rapidapi.com/v3/teams/statistics?team={team_id}"
+        resp = requests.get(url, headers=HEADERS).json()
+        stats = resp.get("response", {})
+        avg_scored = stats.get("goals", {}).get("for", {}).get("total", {}).get("average", 1.5)
+        avg_conceded = stats.get("goals", {}).get("against", {}).get("total", {}).get("average", 1.2)
+        btts_last5 = stats.get("lineups", {}).get("matches", 4)
+        return {"avg_scored": avg_scored, "avg_conceded": avg_conceded, "btts_last5": btts_last5}
+    except:
+        return {"avg_scored": 1.5, "avg_conceded": 1.2, "btts_last5": 4}
+
+# =========================
+# ANÁLISIS DE PICKS
+# =========================
+def analizar(match):
+    home_id = match["teams"]["home"]["id"]
+    away_id = match["teams"]["away"]["id"]
+    home = match["teams"]["home"]["name"]
+    away = match["teams"]["away"]["name"]
+
+    h = get_team_stats(home_id)
+    a = get_team_stats(away_id)
+
+    lambda_home = (h["avg_scored"] + a["avg_conceded"]) / 2
+    lambda_away = (a["avg_scored"] + h["avg_conceded"]) / 2
+    lambda_total = lambda_home + lambda_away
+
+    p_over15 = prob_over_15(lambda_total)
+    p_btts = prob_btts(lambda_home, lambda_away)
+
+    score = 0
+    if p_over15 > 0.75: score += 3
+    if p_btts > 0.65: score += 3
+    if h["btts_last5"] >= 4: score += 2
+    if a["btts_last5"] >= 4: score += 2
+
+    pick = None
+    prob = 0
+    if score >= 8: pick, prob = "🔥 BTTS", p_btts
+    elif score >= 6: pick, prob = "✅ Over 1.5", p_over15
+
+    return {
+        "match": f"{home} vs {away}",
+        "pick": pick,
+        "score": score,
+        "prob": round(prob*100,1),
+        "fixture_id": match["fixture"]["id"],
+        "league": match["league"]["name"] if "league" in match else "General"
+    }
+
+# =========================
+# ACTUALIZACIÓN DE RESULTADOS
+# =========================
+def actualizar_resultados(historico):
+    for fixture_id, info in historico["picks"].items():
+        if info["status"] == "pendiente":
+            try:
+                url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?id={fixture_id}"
+                resp = requests.get(url, headers=HEADERS).json()
+                fixture = resp["response"][0]["fixture"]
+                status = fixture["status"]["short"]
+                goals = resp["response"][0]["goals"]
+                if status in ["FT","AET"]:
+                    home_goals = goals["home"]
+                    away_goals = goals["away"]
+                    acierto = False
+                    if info["pick"]=="🔥 BTTS": acierto = home_goals>0 and away_goals>0
+                    elif info["pick"]=="✅ Over 1.5": acierto = (home_goals+away_goals)>1
+                    info["status"] = "ganado" if acierto else "perdido"
+                    actualizar_estadisticas(historico, info)
+                    send_telegram(f"✅ Resultado pick: {info['match']}\nPick: {info['pick']}\nResultado: {'GANADO' if acierto else 'PERDIDO'}")
+            except Exception as e:
+                print(f"Error actualizando fixture {fixture_id}: {e}")
+    guardar_historico(historico)
 
 # =========================
 # MAIN
 # =========================
 def main():
-    matches = get_matches()
-    all_picks = []
+    historico = cargar_historico()
+    matches = get_matches(days=2)
+    picks_nuevos = []
 
     for m in matches:
         r = analizar(m)
-        if r["picks"]:
-            all_picks.append(r)
+        if r["pick"] and r["fixture_id"] not in historico["picks"]:
+            r["status"] = "pendiente"
+            historico["picks"][r["fixture_id"]] = r
+            picks_nuevos.append(r)
 
-    # Ordenar top picks por la probabilidad más alta
-    all_picks = sorted(all_picks, key=lambda x: max([p[1] for p in x["picks"]]), reverse=True)[:5]
+    if picks_nuevos:
+        msg = "🔥 NUEVOS PICKS PRO+ 🔥\n\n"
+        for p in picks_nuevos:
+            msg += f"{p['match']}\n{p['pick']} | Prob: {p['prob']}% | Score: {p['score']} | Liga: {p['league']}\n\n"
+        send_telegram(msg)
+        guardar_historico(historico)
 
-    msg = "🔥 *PICKS ULTRA PRO DEL DÍA* 🔥\n\n"
-    for p in all_picks:
-        msg += f"🏟 {p['match']}\n"
-        for pick, prob in p["picks"]:
-            msg += f"{pick} | Probabilidad: {prob}%\n"
-        msg += "\n"
+    actualizar_resultados(historico)
 
-    send_telegram(msg)
+    # Resumen diario
+    msg_resumen = "📊 RESUMEN DIARIO DE PICKS 📊\n\n"
+    for liga, stats in historico["estadisticas"].items():
+        msg_resumen += f"{liga}: {stats['ganados']}/{stats['total']} ganados\n"
+    send_telegram(msg_resumen)
 
-if __name__ == "__main__":
-    main()
+# =========================
+# EJECUCIÓN 24/7
+# =========================
+if __name__=="__main__":
+    while True:
+        try:
+            main()
+            time.sleep(60*60)  # revisar cada hora
+        except Exception as e:
+            print("Error principal del bot:", e)
+            time.sleep(60)
