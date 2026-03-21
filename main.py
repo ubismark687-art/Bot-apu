@@ -4,17 +4,17 @@ from datetime import datetime, timedelta
 # =========================
 # CONFIGURACIÓN
 # =========================
-API_KEY = "9aBfJNwvm0r63S4o"
-TELEGRAM_TOKEN = "8780741189:AAGexBjBecMxA0Avscr0nrA8YeY2XB9J1Ss"
-CHAT_ID = "7438828345"
+API_KEY = "9aBfJNwvm0r63S4o"  # tu clave Live Score API
+TELEGRAM_TOKEN = "8780741189:AAGexBjBecMxA0Avscr0nrA8YeY2XB9J1Ss"  # token bot Telegram
+CHAT_ID = "7438828345"  # tu ID Telegram
 
 HEADERS = {"x-rapidapi-key": API_KEY}
 API_HOST = "live-score-api.p.rapidapi.com"
 
-MAX_PARTIDOS = 10  # máximo a enviar
+MAX_PARTIDOS = 10  # máximo de partidos a enviar
 
 # =========================
-# FUNCIONES PRINCIPALES
+# FUNCIONES
 # =========================
 
 def obtener_fixtures(fecha):
@@ -37,22 +37,33 @@ def obtener_resultados_equipo(team_id):
     except:
         return []
 
+def obtener_h2h(home_id, away_id):
+    url = f"https://{API_HOST}/head2head.json"
+    params = {"team1": home_id, "team2": away_id}
+    try:
+        res = requests.get(url, headers=HEADERS, params=params)
+        return res.json().get("results", [])
+    except:
+        return []
+
 def calcular_probabilidades(partido):
-    home = partido["home"]["name"]
-    away = partido["away"]["name"]
     home_id = partido["home"]["id"]
     away_id = partido["away"]["id"]
 
     hist_home = obtener_resultados_equipo(home_id)[:5]
     hist_away = obtener_resultados_equipo(away_id)[:5]
+    h2h = obtener_h2h(home_id, away_id)[:3]
 
+    # Goles promedio
     goles_home = sum(m["home_goals"] for m in hist_home) / 5 if hist_home else 1
     goles_away = sum(m["away_goals"] for m in hist_away) / 5 if hist_away else 1
 
+    # Ambos marcan últimos 5
     both_home = sum(1 for m in hist_home if m["home_goals"] > 0 and m["away_goals"] > 0) / 5 if hist_home else 0
     both_away = sum(1 for m in hist_away if m["home_goals"] > 0 and m["away_goals"] > 0) / 5 if hist_away else 0
+    both_h2h = sum(1 for m in h2h if m["home_goals"] > 0 and m["away_goals"] > 0) / 3 if h2h else 0
 
-    prob_ambos = ((both_home + both_away) / 2) * 100
+    prob_ambos = ((both_home + both_away + both_h2h) / 3) * 100
     avg_goles_total = (goles_home + goles_away) / 2
     prob_over25 = min(avg_goles_total / 3 * 100, 100)
     score_total = (prob_ambos * 0.5) + (prob_over25 * 0.5)
